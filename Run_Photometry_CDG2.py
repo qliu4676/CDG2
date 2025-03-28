@@ -488,7 +488,6 @@ def run_photometry_analysis(file_name, file_name_psf,
     
     return table, gc_model, iso_model, isolist
 
-# [Other existing functions like do_PSF_photometry, do_Isophote_Fitting, background_extraction, etc.]
 
 def parse_arguments():
     """
