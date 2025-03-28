@@ -476,7 +476,7 @@ def run_photometry_analysis(file_name, file_name_psf,
     models = {'gc':gc_model, 'iso':iso_model}
     
     # Plot the model and residual
-    make_plot(data, models, aper_cdg2, aper_gc, bkg, std, output_dir=output_dir)
+    make_plot(data, models, aper_cdg2, aper_gc, std, output_dir=output_dir)
     
     # Write results to a table
     table = Table(result)
@@ -509,18 +509,18 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def make_plot(data, models, aper_cdg2, aper_gc, bkg, std, output_dir='./'):
+def make_plot(data, models, aper_cdg2, aper_gc, std, output_dir='./'):
     """ Plot the results """
     
     from photutils.datasets import make_noise_image
-    noise = make_noise_image(data.shape, distribution='gaussian', mean=0.0, stddev=std, seed=random_seed)
+    noise = make_noise_image(data.shape, distribution='gaussian', mean=0.0, stddev=0.5*std, seed=random_seed)
     
     gc_model, iso_model = models['gc'], models['iso']
     model_tot = gc_model + iso_model
     residual = data - model_tot
     
-    norm = ImageNormalize(data, stretch=AsinhStretch(0.2), vmin=bkg-3, vmax=bkg+22.)
-    norm2 = ImageNormalize(data, stretch=AsinhStretch(0.2), vmin=-1, vmax=24.)
+    norm = ImageNormalize(data, stretch=AsinhStretch(0.25), vmin=-3, vmax=22.)
+    norm2 = ImageNormalize(data, stretch=AsinhStretch(0.25), vmin=-1, vmax=24.)
 
     fig, (ax1,ax2,ax3) = plt.subplots(1,3,figsize=(15,5), dpi=80, constrained_layout=True)
     ax1.imshow(data, norm=norm)
