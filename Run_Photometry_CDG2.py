@@ -1,37 +1,23 @@
 #!/usr/bin/env python3
 import os
-import argparse
 from tqdm import tqdm
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
-from matplotlib import patches
-from matplotlib import rcParams
-plt.rcParams['image.origin'] = 'lower'
-plt.rcParams['image.cmap'] = 'viridis'
 
 import astropy.units as u
 from astropy.wcs import WCS
 from astropy.io import fits
 from astropy.table import Table, QTable
-from astropy.nddata import Cutout2D
-from astropy.coordinates import SkyCoord
-from astropy.stats import mad_std, SigmaClip
 from astropy.convolution import convolve_fft, Gaussian2DKernel
 from astropy.visualization import ImageNormalize, LogStretch, AsinhStretch
 
-from photutils.aperture import CircularAperture, EllipticalAperture
-from photutils.detection import DAOStarFinder
 from photutils.segmentation import detect_sources, deblend_sources
-from photutils.background import LocalBackground, MMMBackground, Background2D, SExtractorBackground
-from photutils.psf import EPSFModel, SourceGrouper, PSFPhotometry, IterativePSFPhotometry
+from photutils.background import LocalBackground, MMMBackground, Background2D
+from photutils.psf import EPSFModel, SourceGrouper, PSFPhotometry
 from photutils.isophote import EllipseGeometry, Ellipse, IsophoteList, build_ellipse_model
-from photutils.datasets import make_noise_image
-from photutils.utils import make_random_cmap
-# Set random seed for reproducibility
-random_seed = 4676
-rand_cmap = make_random_cmap(256, seed=random_seed)
-rand_cmap.set_under(color='black')
+
+from toolbox import *
 
 # CDG-2 coordinates in hourangle, deg
 coords_cdg2 = ("3h17m12.61s", "41d20m51.5s") 
@@ -47,10 +33,10 @@ pixel_scale = 0.3 # arcsec/pix
 zp = 30.132 # zero-point
 distance_Perseus = 75 * u.Mpc
 
-# Photometry kws
 fix_gc_centers = False # If True, fix GC centers
-isophote_fitting_kws = {'min_sma':0.5, 'max_sma':17, 'step':0.25} # Parameters for isophote fitting
+iso_fit_kws = {'min_sma':0.5, 'max_sma':17, 'step':0.25} # Parameters for isophote fitting
 
+n_iter = 10 # number of iterations
 
 def main(file_name, file_name_psf, output_dir=None):
     """
@@ -73,68 +59,30 @@ def main(file_name, file_name_psf, output_dir=None):
     os.makedirs(output_dir, exist_ok=True)
 
     # Setup apertures
-    aper_cdg2, aper_gc = make_apertures(coords_cdg2, coords_gc, file_name, aperture_cdg2=5, aperture_gc=0.6)
+    aper_cdg2, aper_gc = make_apertures(coords_cdg2, coords_gc, file_name, pixel_scale, aperture_cdg2=5, aperture_gc=0.6)
     
     # Run photometry analysis
-    table, gc_model, iso_model, isolist = run_photometry_analysis(
-        file_name, file_name_psf, aper_gc, aper_cdg2, 
-        n_iter=100, 
-        output_dir=output_dir
+    table, data, models, isolist = run_photometry_analysis(
+        file_name, file_name_psf, aper_gc, aper_cdg2,
+        fix_gc_centers=fix_gc_centers,
+        isophote_fitting_kws=iso_fit_kws,
+        n_iter=n_iter, output_dir=output_dir
     )
+    
+    # Plot the model and residual
+    make_plot_Euclid(data, models, aper_cdg2, aper_gc, output_dir=output_dir)
     
     # Averaged total flux of GC and total flux of diffuse emission
     flux_gc_med = np.median(table['flux_gc'][1:])
     flux_cdg2_med = np.median(table['flux_cdg2'][1:])
     
     # Calculate luminosity
-    calculate_cdg2_luminosity(flux_cdg2_med, flux_gc_med)
+    calculate_cdg2_luminosity(flux_cdg2_med, flux_gc_med, distance_Perseus, zp, factor=0.5)
     
-    
-def make_apertures(coords_cdg2, coords_gc, file_name, aperture_cdg2=5, aperture_gc=0.6):
-    """
-    Create circular apertures for the CDG-2 galaxy and its globular clusters.
-    
-    Parameters
-    ----------
-    coords_cdg2 : tuple
-        Celestial coordinates of the CDG-2 galaxy center (RA, Dec).
-    coords_gc : list of tuples
-        Celestial coordinates of globular clusters.
-    file_name: str
-        Path to the input FITS image file.
-    aperture_cdg2 : float, optional
-        Aperture radius for CDG-2 in arcseconds. Default is 5.
-    aperture_gc : float, optional
-        Aperture radius for globular clusters in arcseconds. Default is 0.6.
-    
-    Returns
-    -------
-    aper_cdg2 : CircularAperture
-        Aperture for the CDG-2 galaxy.
-    aper_gc_mask : list of CircularAperture
-        Apertures for globular clusters.
-    """
-    
-    data, header = fits.getdata(file_name, header=True)
-    wcs = WCS(header)
+    return models
 
-    radius_cdg2 = int(aperture_cdg2/pixel_scale) # in pixel
-    radius_gc = int(aperture_gc/pixel_scale) # in pixel
 
-    # CDG2 aperture
-    coords_cdg2 = SkyCoord(ra=coords_cdg2[0], dec=coords_cdg2[1], unit=(u.hourangle, u.deg))
-    pos_cdg2 = wcs.all_world2pix(coords_cdg2.ra, coords_cdg2.dec, 0)
-    aper_cdg2 = CircularAperture(pos_cdg2, radius_cdg2)
-    
-    # GC apertures
-    coords_gc = [SkyCoord(coords[0], coords[1], unit=(u.hourangle, u.deg)) for coords in coords_gc]
-    positions_gc = np.array([wcs.all_world2pix(coords.ra, coords.dec, 0) for coords in coords_gc])
-    aper_gc_mask = [CircularAperture(pos, radius_gc) for pos in positions_gc]
-    
-    return aper_cdg2, aper_gc_mask
-    
-    
-def do_PSF_photometry(data, psf_model, 
+def do_PSF_photometry(data, psf_model,
                       positions_guess, fit_shape, 
                       r_inner=4, r_outer=6, 
                       min_separation=5,
@@ -280,46 +228,24 @@ def do_Isophote_Fitting(data, position,
     residual_iso = data - iso_model
     
     return isolist, iso_model, residual_iso
-
-def background_extraction(data, mask, box_size=32, filter_size=3):
-    """
-    Extract 2D background from the image.
     
-    Uses photutils.background.Background2D to estimate background and background RMS.
-    
-    Parameters
-    ----------
-    data : numpy.ndarray
-        2D image data.
-    mask : numpy.ndarray
-        Mask (=1) to exclude certain regions from background estimation.
-    box_size : int, optional
-        Size of background estimation boxes. Default is 32.
-    filter_size : int, optional
-        Size of background smoothing filter. Default is 3.
-    
-    Returns
-    -------
-    bkg : numpy.ndarray
-        Estimated background.
-    bkg_rms : numpy.ndarray
-        Estimated background RMS.
-    """
-    Bkg = Background2D(data, mask=mask,
-                       bkg_estimator=SExtractorBackground(),
-                       box_size=box_size, filter_size=filter_size,
-                       sigma_clip=SigmaClip(sigma=3., maxiters=5))
-    bkg = Bkg.background
-    bkg_rms = Bkg.background_rms
-    
-    return bkg, bkg_rms
-    
-def run_photometry_analysis(file_name, file_name_psf, 
-                            aper_gc, aper_cdg2, 
-                            r_inner=4, r_outer=6, back_size=32,
-                            sn_thre=2, smooth_stddev=1, n_iter=3,
-                            isophote_fitting_kws=isophote_fitting_kws,
-                            output_dir=None):    
+def run_photometry_analysis(file_name,
+                            file_name_psf,
+                            aper_gc,
+                            aper_cdg2,
+                            r_inner=4,
+                            r_outer=6,
+                            aperture_radius=3,
+                            min_separation=5,
+                            fix_gc_centers=False,
+                            back_size=32,
+                            sn_thre=2,
+                            smooth_stddev=1,
+                            n_iter=3,
+                            nan_pad=True,
+                            cutoff_SB=5,
+                            isophote_fitting_kws=iso_fit_kws,
+                            output_dir=None):
     """
     Perform iterative PSF photometry + isophote fitting on a galaxy image.
     
@@ -337,6 +263,12 @@ def run_photometry_analysis(file_name, file_name_psf,
         Inner radius for local background estimation in pixel. Default is 4.
     r_outer : float, optional
         Outer radius for local background estimation in pixel. Default is 6.
+    aperture_radius : float, optional
+        Radius for aperture photometry in pixel. Default is 3.
+    min_separation : float, optional
+        Minimum separation between sources in pixel. Default is 5.
+    fix_gc_centers : bool, optional
+        If True, fix GC centers.
     back_size : int, optional
         Size of background estimation boxes. Default is 32.
     sn_thre : float, optional
@@ -371,22 +303,24 @@ def run_photometry_analysis(file_name, file_name_psf,
     bkg = np.median(data)
     data = data - bkg
     
-    # Using 1.5 * mad_std as estimate of uncertainty
-    std = 1.5 * mad_std(data, ignore_nan=True)
-    
     # Read PSF
     psf = fits.getdata(file_name_psf)
-    psf = psf[:-1,:-1]/np.nansum(psf)    # Remove the input PSF nan padding, as shape needs to be in odd
+    if nan_pad:
+        psf = psf[:-1,:-1]   # Remove the input PSF nan padding, as shape needs to be in odd
+    psf = psf/np.nansum(psf)
 
     # Make PSF model
     psf_model = EPSFModel(psf, x_0=psf.shape[1]/2+0.5, y_0=psf.shape[0]/2+0.5, flux=1)
     yy, xx = np.mgrid[:psf.shape[0], :psf.shape[1]]
     psf_data = psf_model(xx, yy)
     
-    #Fix the position of models if fix_gc_centers is True
+    # Fix the position of models if fix_gc_centers is True
     if fix_gc_centers:
         psf_model.x_0.fixed = True
         psf_model.y_0.fixed = True
+        
+    # Constrain the flux to be greater than 0
+    psf_model.flux.bounds = (0, None)
     
     # Make mask for GCs and CDG-2
     mask_gc = np.logical_or.reduce([aper.to_mask().to_image(data.shape)>0.5 for aper in aper_gc])
@@ -397,12 +331,14 @@ def run_photometry_analysis(file_name, file_name_psf,
     
     ##### Run PSF photometry #####
     psf_photometry_kws = dict(r_inner=r_inner, 
-                              r_outer=r_outer, 
-                              error=back_rms, 
+                              r_outer=r_outer,
+                              aperture_radius=aperture_radius,
+                              min_separation=min_separation,
+                              error=back_rms,
                               fit_shape=psf_data.shape)
     positions_gc = np.array([aper.positions for aper in aper_gc])
 
-    phot, gc_model, residual = do_PSF_photometry(data, psf_model, positions_gc, **psf_photometry_kws)
+    phot, gc_model, residual = do_PSF_photometry(data, psf_model, positions_gc, verbose=False, **psf_photometry_kws)
 
     # Detect and mask nearby bright sources
     threshold = back + (sn_thre * back_rms)
@@ -451,6 +387,8 @@ def run_photometry_analysis(file_name, file_name_psf,
         isolist, iso_model, _ = do_Isophote_Fitting(data_conv, aper_cdg2.positions, **isophote_fitting_kws)
         residual_iso = data - iso_model
         
+        # print(iso_model.sum())
+        
         # Re-do PSF photometry
         verbose = True if k>=n_iter-1 else False
         phot2, gc_model, residual = do_PSF_photometry(residual_iso, psf_model, positions_gc, verbose=verbose, **psf_photometry_kws) 
@@ -473,133 +411,18 @@ def run_photometry_analysis(file_name, file_name_psf,
     
     print(f"Flux GC = {flux_gc:.3f}+/-{flux_gc_err:.3f}, Flux CDG-2 = {flux_cdg2:.3f}+/-{flux_cdg2_err:.3f}, F_GC/F_CDG-2 = {f_gc:.4f}+/-{f_gc_err:.4f}\n")
     
+    data = np.ma.array(data - back, mask=mask_src)
     models = {'gc':gc_model, 'iso':iso_model}
-    
-    # Plot the model and residual
-    make_plot(data, models, aper_cdg2, aper_gc, std, output_dir=output_dir)
     
     # Write results to a table
     table = Table(result)
     
-    table.write(os.path.join(output_dir, 'CDG-2_Euclid.txt'), format='ascii', overwrite=True)
+    table.write(os.path.join(output_dir, 'CDG-2_fitting.txt'), format='ascii', overwrite=True)
     
     # Calculate mean SB
-    calculate_cdg2_mean_SB(isolist, data)
+    calculate_cdg2_mean_SB(isolist, data, pixel_scale, zp, cutoff=cutoff_SB)
     
-    return table, gc_model, iso_model, isolist
-
-
-def parse_arguments():
-    """
-    Parse command-line arguments for the script.
-    
-    Returns
-    -------
-    argparse.Namespace
-        Parsed arguments with file_name, file_name_psf, and output_dir.
-    """
-    parser = argparse.ArgumentParser(description='Perform photometric analysis on a CDG-2 galaxy.')
-    parser.add_argument('file_name', help='Path to the input FITS image file')
-    parser.add_argument('file_name_psf', help='Path to the input PSF FITS file')
-    parser.add_argument('-o', '--output_dir', 
-                        help='Directory to save output files (optional)', 
-                        default=None)
-    
-    return parser.parse_args()
-
-
-def make_plot(data, models, aper_cdg2, aper_gc, std, output_dir='./'):
-    """ Plot the results """
-    
-    from photutils.datasets import make_noise_image
-    noise = make_noise_image(data.shape, distribution='gaussian', mean=0.0, stddev=0.5*std, seed=random_seed)
-    
-    gc_model, iso_model = models['gc'], models['iso']
-    model_tot = gc_model + iso_model
-    residual = data - model_tot
-    
-    norm = ImageNormalize(data, stretch=AsinhStretch(0.25), vmin=-3, vmax=22.)
-    norm2 = ImageNormalize(data, stretch=AsinhStretch(0.25), vmin=-1, vmax=24.)
-
-    fig, (ax1,ax2,ax3) = plt.subplots(1,3,figsize=(15,5), dpi=80, constrained_layout=True)
-    ax1.imshow(data, norm=norm)
-    ax2.imshow(model_tot+noise, norm=norm2)
-    ax3.imshow(residual, norm=norm)
-
-    for ax in (ax1, ax2,ax3):
-        ax.set_xlim(data.shape[1]//2-75, data.shape[1]//2+75)
-        ax.set_ylim(data.shape[0]//2-75, data.shape[0]//2+75)
-        ax.axis('off')
-
-        aper_cdg2.plot(color='r', ls='--', lw=3, ax=ax)
-        for aper in aper_gc:
-            aper.plot(color='w', lw=2, ax=ax)
-
-    ax1.set_title('Data', fontsize=20)
-    ax2.set_title('GC+Isophote model', fontsize=20)
-    ax3.set_title('Residual', fontsize=20)
-
-    plt.savefig(os.path.join(output_dir, 'CDG-2_Euclid_modeling_zoom.png'))
-    plt.close()
-    
-    
-def calculate_cdg2_mean_SB(isolist, data, cutoff=5):
-    """
-    Calculate mean surface brightness of the galaxy from the isophote model.
-    
-    Parameters
-    ----------
-    isolist : IsophoteList
-        List of fitted isophotes.
-    data : numpy.ndarray
-        2D image data to perform photometry on.
-    cutoff : float, optional
-        Cutoff radius in arcseconds. Default is 5.
-    """
-    
-    # Only use isophote models within a cutoff (checked with radial profile)
-    index_cutoff = np.argmin(isolist.sma*pixel_scale < cutoff)
-    iso_model_final = build_ellipse_model(data.shape, isolist[:index_cutoff])
-    
-    # Compute mean SB
-    flux_iso = iso_model_final.sum()
-    area = np.sum(iso_model_final>0)
-    SB_mean = -2.5*np.log10(flux_iso/area) + zp + 2.5 * np.log10(pixel_scale**2)
-    
-    print(f"Mean surface brightness CDG-2 (isophote model): {SB_mean:.2f} mag/arcsec^2\n")
-    
-    
-def calculate_cdg2_luminosity(flux_cdg2, flux_gc):
-    """
-    Calculate luminosity of the galaxy and GCs.
-    
-    Parameters
-    ----------
-    flux_cdg2 : float
-        Flux of the galaxy (diffuse component).
-    flux_gc : float
-        Flux of globular clusters.
-    """
-    
-    distance_modulus = 5*np.log10(distance_Perseus.to(u.pc).value)-5
-
-    flux_tot = flux_gc + flux_cdg2
-
-    m_cdg2 = -2.5*np.log10(flux_cdg2) + zp
-    M_cdg2 = m_cdg2 - distance_modulus
-    M_cdg2 = M_cdg2+0.5 # conversion factor from I_E to V is 0.5
-    L_cdg2 = 10**((M_cdg2-4.8)/(-2.5))
-    
-    print(f"Absolute V-mag CDG-2 (diffuse): {M_cdg2:.3f}")
-    print(f"Luminosity CDG-2 (diffuse) in Solar Units: {L_cdg2:.3e}\n")
-    
-    m_gc = -2.5*np.log10(flux_gc) + zp
-    M_gc = m_gc - distance_modulus
-    M_gc = M_gc+0.5 # conversion factor from I_E to V is 0.5
-    L_gc = 10**((M_gc-4.8)/(-2.5))
-    
-    print(f"Absolute V-mag GC: {M_gc:.3f}")
-    print(f"Luminosity GC in Solar Units: {L_gc:.3e}\n")
+    return table, data, models, isolist
 
     
 if __name__ == "__main__":
