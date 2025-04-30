@@ -155,7 +155,7 @@ def calculate_cdg2_mean_SB(isolist, data, pixel_scale, zp, cutoff=5):
     print(f"Mean surface brightness CDG-2 (isophote model): {SB_mean:.2f} mag/arcsec^2\n")
     
     
-def calculate_cdg2_luminosity(flux_cdg2, flux_gc, distance, zp, factor=0.5):
+def calculate_cdg2_luminosity(flux_cdg2, flux_gc, distance, zp, Msun=4.8, factor=0.5):
     """
     Calculate luminosity of the galaxy and GCs.
     
@@ -176,7 +176,7 @@ def calculate_cdg2_luminosity(flux_cdg2, flux_gc, distance, zp, factor=0.5):
     m_cdg2 = -2.5*np.log10(flux_cdg2) + zp
     M_cdg2 = m_cdg2 - distance_modulus
     M_cdg2 = M_cdg2+factor # conversion factor from I_E to V is 0.5
-    L_cdg2 = 10**((M_cdg2-4.8)/(-2.5))
+    L_cdg2 = 10**((M_cdg2-Msun)/(-2.5))
     
     print(f"Absolute V-mag CDG-2 (diffuse): {M_cdg2:.3f}")
     print(f"Luminosity CDG-2 (diffuse) in Solar Units: {L_cdg2:.3e}\n")
@@ -184,7 +184,7 @@ def calculate_cdg2_luminosity(flux_cdg2, flux_gc, distance, zp, factor=0.5):
     m_gc = -2.5*np.log10(flux_gc) + zp
     M_gc = m_gc - distance_modulus
     M_gc = M_gc+factor # conversion factor from I_E to V is 0.5
-    L_gc = 10**((M_gc-4.8)/(-2.5))
+    L_gc = 10**((M_gc-Msun)/(-2.5))
     
     print(f"Absolute V-mag GC: {M_gc:.3f}")
     print(f"Luminosity GC in Solar Units: {L_gc:.3e}\n")
